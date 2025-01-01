@@ -123,7 +123,8 @@ def log_metric(
     train_time: float,
     step: int,
     epoch: int,
-    learning_rate: float = None,
+    g_learning_rate: float = None,
+    d_learning_rate: float = None,
     prefix: str = "train",
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
@@ -135,8 +136,10 @@ def log_metric(
             log_metrics[f"{prefix}/{k}"] = v
     log_metrics[f"{prefix}/time"] = train_time
     log_metrics[f"{prefix}/epoch"] = epoch
-    if learning_rate is not None:
-        log_metrics[f"{prefix}/learning_rate"] = learning_rate
+    if g_learning_rate is not None:
+        log_metrics[f"{prefix}/g_learning_rate"] = g_learning_rate
+    if d_learning_rate is not None:
+        log_metrics[f"{prefix}/d_learning_rate"] = d_learning_rate
     accelerator.log(log_metrics, step=step)
 
 

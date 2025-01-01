@@ -157,7 +157,7 @@ class MimiConfig(PretrainedConfig):
         trim_right_ratio=1.0,
         codebook_size=2048,
         codebook_dim=256,
-        num_quantizers=32,
+        num_quantizers=9,
         use_conv_shortcut=False,
         vector_quantization_hidden_dimension=256,
         num_semantic_quantizers=1,
@@ -177,6 +177,17 @@ class MimiConfig(PretrainedConfig):
         attention_dropout=0.0,
         layer_scale_initial_scale=0.01,
         attention_bias=False,
+
+        ### New
+        semantic_feature_dim=1024,
+        pooling_kernel_size=8,
+        pooling_stride=4,
+        q_dropout=True,
+        no_quantization_rate=0.0,
+        decay=0.99,
+        threshold_usage_ratio=0.1,
+        replaced_usage_ratio=1.0,
+        check_unused_every=5,
         **kwargs,
     ):
         self.sampling_rate = sampling_rate
@@ -215,6 +226,17 @@ class MimiConfig(PretrainedConfig):
         self.head_dim = head_dim or hidden_size // num_attention_heads
         self.layer_scale_initial_scale = layer_scale_initial_scale
         self.attention_bias = attention_bias
+
+        self.semantic_feature_dim = semantic_feature_dim
+        self.pooling_kernel_size = pooling_kernel_size
+        self.pooling_stride = pooling_stride
+        self.q_dropout = q_dropout
+        self.no_quantization_rate = no_quantization_rate
+
+        self.decay = decay
+        self.threshold_usage_ratio = threshold_usage_ratio
+        self.replaced_usage_ratio = replaced_usage_ratio
+        self.check_unused_every = check_unused_every
 
         if num_semantic_quantizers >= self.num_quantizers:
             raise ValueError(

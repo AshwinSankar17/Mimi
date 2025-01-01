@@ -1,3 +1,4 @@
+import typing as tp
 import torch
 import torch.nn as nn
 import nemo.collections.asr as nemo_asr
@@ -5,7 +6,7 @@ from transformers import AutoFeatureExtractor, Wav2Vec2BertModel
 
 from einops import rearrange
 
-def mask_from_lens(lens, max_len: Optional[int] = None):
+def mask_from_lens(lens, max_len: tp.Optional[int] = None):
     if max_len is None:
         max_len = lens.max()
     ids = torch.arange(0, max_len, device=lens.device, dtype=lens.dtype)
@@ -26,11 +27,11 @@ class W2V2BertFeature(nn.Module):
 
         Args:
             config: Configuration object containing model-related parameters,
-                    including the `semantic_model` (path or name of the pretrained model).
+                    including the `speech_encoder_model_name_or_path` (path or name of the pretrained model).
         """
         super(W2V2BertFeature, self).__init__()
-        self.processor = AutoFeatureExtractor.from_pretrained(config.semantic_model)
-        self.model = Wav2Vec2BertModel.from_pretrained(config.semantic_model)
+        self.processor = AutoFeatureExtractor.from_pretrained(config.speech_encoder_model_name_or_path)
+        self.model = Wav2Vec2BertModel.from_pretrained(config.speech_encoder_model_name_or_path)
         self.freeze()
 
     def freeze(self):
@@ -57,10 +58,11 @@ class W2V2BertFeature(nn.Module):
         if input_ids.ndim == 3:
             input_ids = rearrange(input_ids, 'b 1 t -> b t')
         assert input_ids.ndim == 2, "Expected input shape (B, T)."
-        audio_lengths = (input_ids != 0).sum(dim=1).to(input_ids.device)
+
+        audios_list = [audio[audio != 0].cpu().numpy() for audio in input_ids]
         
         inputs = self.processor(
-            input_ids.cpu(), 
+            audios_list, 
             sampling_rate=self.processor.sampling_rate, 
             return_tensors="pt", 
             padding=True
@@ -84,10 +86,10 @@ class IndicConformerFeature(nn.Module):
 
         Args:
             config: Configuration object containing model-related parameters,
-                    including the `semantic_model` (path or name of the pretrained model).
+                    including the `speech_encoder_model_name_or_path` (path or name of the pretrained model).
         """
         super(IndicConformerFeature, self).__init__()
-        self.model = nemo_asr.models.ASRModel.from_pretrained(config.semantic_model)
+        self.model = nemo_asr.models.ASRModel.from_pretrained(config.speech_encoder_model_name_or_path)
         self.freeze()
 
     def freeze(self):

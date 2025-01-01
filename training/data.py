@@ -10,7 +10,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from datasets import Dataset, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
 
-from semantic_features import mask_from_lens
+from semantic_features import mask_from_lens, W2V2BertFeature
 
 
 @dataclass
@@ -18,34 +18,36 @@ class DataCollatorMimiCodecWithPadding:
     audio_column_name: str
     max_audio_length: float = 7.0
     sampling_rate: int = 24_000
-    ssl_sampling_rate: int = 16_000
-    padding: Optional[str] = "longest"
+    semantic_feature_model: torch.nn.Module
+    # ssl_sampling_rate: int = 16_000
 
     def __call__(self, batch: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # Check if sampling rate matches
         assert self.sampling_rate == batch[0][self.audio_column_name]["sampling_rate"], (
             "Given sampling rate and audio column sampling rate do not match"
         )
+        ssl_sampling_rate = semantic_feature_model.sampling_rate
         
         # Calculate max audio length in samples
-        max_length = int(self.max_audio_length * self.sampling_rate)
+        max_audio_pad_length = int(self.max_audio_length * self.sampling_rate)
         
         # Extract and truncate audio arrays
-        audios = [feature[self.audio_column_name]["array"][:max_length] for feature in batch]
+        audios = [torch.from_numpy(feature[self.audio_column_name]["array"][:max_audio_pad_length]) for feature in batch]
         len_audio = torch.tensor([len(audio) for audio in audios], dtype=torch.int32)
         
         # Calculate max audio length in samples
-        max_ssl_length = int(self.max_audio_length * self.ssl_sampling_rate)
+        max_ssl_pad_length = int(self.max_audio_length * self.ssl_sampling_rate)
         # Resample audio for SSL models
         audios_ssl = [
-            librosa.resample(
-                feature[self.audio_column_name]["array"][:max_length], 
+            torch.from_numpy(librosa.resample(
+                feature, 
                 orig_sr=self.sampling_rate, 
                 target_sr=self.ssl_sampling_rate
-            )
-            for feature in batch
+            ))
+            for feature in audios
         ]
-        ssl_len_audio = torch.tensor([len(audio) for audio in audios_ssl], dtype=torch.int32)
+
+        # ssl_len_audio = torch.tensor([len(audio) for audio in audios_ssl], dtype=torch.int32)
         
         # Pad audios and audios_ssl
         def pad_sequences(sequences, max_length, pad_value=0.0):
@@ -54,31 +56,18 @@ class DataCollatorMimiCodecWithPadding:
                 length = min(len(seq), max_length)
                 padded[i, :length] = torch.tensor(seq[:length], dtype=torch.float32)
             return padded
-        
-        # Determine padding lengths
-        if self.padding == "longest":
-            max_audio_pad_length = max(len_audio)
-            max_ssl_pad_length = max(ssl_len_audio)
-        else:
-            max_audio_pad_length = max_length
-            max_ssl_pad_length = max_ssl_length
 
         # Apply padding
         audios_padded = pad_sequences(audios, max_audio_pad_length)
-        audios_ssl_padded = pad_sequences(audios_ssl, max_ssl_pad_length)
-
-        # Get padding mask
         audios_padding_mask = mask_from_lens(len_audio)
-        ssl_audios_padding_mask = mask_from_lens(ssl_len_audio)
+        ssl_embeddings, ssl_padding_mask = self.semantic_feature_model(audios_ssl)
         
         # Return as dictionary
         return {
             "input_values": audios_padded,
-            "input_lengths": len_audio,
             "input_padding_mask": audios_padding_mask,
-            "input_values_ssl": audios_ssl_padded,
-            "input_lengths_ssl": ssl_len_audio,
-            "input_padding_mask_ssl": ssl_audios_padding_mask,
+            "ssl_embeddings": ssl_embeddings,
+            "ssl_padding_mask": ssl_padding_mask,
         }
 
 

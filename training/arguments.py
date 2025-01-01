@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from transformers import Seq2SeqTrainingArguments
+from transformers import TrainingArguments
 
 
 @dataclass
@@ -13,17 +13,20 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-    config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+    discriminator_model_name_or_path: str = field(
+        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models for discriminator"}
     )
     attn_implementation: str = field(
-        default="eager",
-        metadata={"help": "Attention implementation used. One of `eager`, `sdpa`, `flash_attention_2`"},
+        default="flex",
+        metadata={"help": "Attention implementation used. One of `eager`, `sdpa`, `flash_attention_2`, `flex`"},
+    )
+    ssl_model_name_or_path: Optional[str] = field(
+        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
 
 
 @dataclass
-class DataTrainingArguments:
+class DataArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
 
@@ -31,7 +34,18 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-
+    sampling_rate: int = field(
+        default=24_000,
+        metadata={
+            "help": ("The sampling rate at which the codec should be trained")
+        }
+    )
+    ssl_sampling_rate: int = field(
+        default=16_000,
+        metadata={
+            "help": ("The sampling rate at which the codec should be trained")
+        }
+    )
     train_dataset_name: str = field(
         default=None,
         metadata={
@@ -108,7 +122,7 @@ class DataTrainingArguments:
         },
     )
     max_duration_in_seconds: float = field(
-        default=35.0,
+        default=7.0,
         metadata={
             "help": (
                 "Clip audio files that are longer than `max_duration_in_seconds` seconds to 'max_duration_in_seconds`."
@@ -116,19 +130,7 @@ class DataTrainingArguments:
         },
     )
     min_duration_in_seconds: float = field(
-        default=0.0, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
-    )
-    preprocessing_only: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Whether to only do data preprocessing and skip training. This is especially useful when data"
-                " preprocessing errors out in distributed training due to timeout. In this case, one should run the"
-                " preprocessing in a non-distributed setup with `preprocessing_only=True` so that the cached datasets"
-                " can consequently be loaded in distributed training."
-                " In this training script, `save_to_disk` must be set to the path in which the dataset should be saved. "
-            )
-        },
+        default=0.5, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
     )
     token: str = field(
         default=None,
@@ -139,12 +141,6 @@ class DataTrainingArguments:
             )
         },
     )
-    use_auth_token: bool = field(
-        default=None,
-        metadata={
-            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead."
-        },
-    )
     trust_remote_code: bool = field(
         default=False,
         metadata={
@@ -152,6 +148,14 @@ class DataTrainingArguments:
                 "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option "
                 "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
                 "execute code present on the Hub on your local machine."
+            )
+        },
+    )
+    streaming: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether or not to load the datasets in streaming mode."
             )
         },
     )
@@ -170,18 +174,12 @@ class DataTrainingArguments:
             "help": "If specified, the name of the run. If not specified, wandb will give a random name to this run."
         },
     )
-    save_to_disk: str = field(
-        default=None,
-        metadata={
-            "help": "If set, will save the dataset to this path if this is an empyt folder. If not empty, will load the datasets from it."
-        },
-    )
 
 
 @dataclass
 class MimiCodecTrainingArguments(Seq2SeqTrainingArguments):
     dtype: Optional[str] = field(
-        default="float32",
+        default="bfloat16",
         metadata={
             "help": (
                 "The data type (dtype) in which to run training. One of `float32` (full-precision), "
@@ -190,7 +188,7 @@ class MimiCodecTrainingArguments(Seq2SeqTrainingArguments):
         },
     )
     per_device_batch_size: int = field(
-        default=8,
+        default=96,
         metadata={"help": ("Specify the batch size of the audio encoding pre-processing steps.")},
     )
     train_dataloader_num_workers: Optional[int] = field(
@@ -202,10 +200,103 @@ class MimiCodecTrainingArguments(Seq2SeqTrainingArguments):
         },
     )
     eval_dataloader_num_workers: Optional[int] = field(
-        default=0,
+        default=8,
         metadata={
             "help": (
                 "Number of subprocesses to use for evaluation data loading (PyTorch only). 0 means that the data will be loaded in the main process."
             )
         },
+    )
+
+@dataclass
+class DiscriminatorArguments:
+    num_filters: int = field(
+        default=32,
+        metadata={
+            "help": "Number of filters in convolutions for MultiScaleSTFTDiscriminator"
+        }
+    )
+    in_channels: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "Number of input channels to MultiScaleSTFTDiscriminator"
+        }
+    )
+    out_channels: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "Number of output channels to MultiScaleSTFTDiscriminator"
+        }
+    )
+    n_ffts: Optional[List[int]] = field(
+        default_factory=lambda: [1024, 2048, 512],
+        metadata={
+            "help": "Size of FFT for each scale in MultiScaleSTFTDiscriminator"
+        }
+    )
+    hop_lengths: Optional[List[int]] = field(
+        default_factory=lambda: [256, 512, 128],
+        metadata={
+            "help": "Length of hops STFT windows for each scale in MultiScaleSTFTDiscriminator"
+        }
+    )
+    window_lengths: Optional[List[int]] = field(
+        default_factory=lambda: [1024, 2048, 512],
+        metadata={
+            "help": "Window size for each scale in MultiScaleSTFTDiscriminator"
+        }
+    )
+    max_filters: int = field(
+        default=1024,
+        metadata={
+            "help": "Maximum number of filters for the discriminator"
+        }
+    )
+    filters_scale: int = field(
+        default=1,
+        metadata={
+            "help": "Scale factor for the filters"
+        }
+    )
+    kernel_size: Tuple[int, int] = field(
+        default_factory=lambda: (3, 9),
+        metadata={
+            "help": "Kernel size for convolutions"
+        }
+    )
+    dilations: List[int] = field(
+        default_factory=lambda: [1, 2, 4],
+        metadata={
+            "help": "Dilation rates for convolutions"
+        }
+    )
+    stride: Tuple[int, int] = field(
+        default_factory=lambda: (1, 2),
+        metadata={
+            "help": "Stride for convolutions"
+        }
+    )
+    normalized: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to normalize the input"
+        }
+    )
+    norm: str = field(
+        default='weight_norm',
+        metadata={
+            "help": "Normalization technique to use"
+        }
+    )
+    activation: str = field(
+        default='LeakyReLU',
+        metadata={
+            "help": "Activation function to use"
+        }
+    )
+    activation_params: dict = field(
+        default_factory=lambda: {'negative_slope': 0.2},
+        metadata={
+            "help": "Parameters for the activation function"
+        }
     )
