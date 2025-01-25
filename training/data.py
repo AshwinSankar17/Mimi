@@ -16,7 +16,7 @@ from semantic_features import mask_from_lens, W2V2BertFeature
 @dataclass
 class DataCollatorMimiCodecWithPadding:
     audio_column_name: str
-    max_audio_length: float = 7.0
+    max_audio_length: float = 12.0
     sampling_rate: int = 24_000
     semantic_feature_model: torch.nn.Module
     # ssl_sampling_rate: int = 16_000
@@ -36,13 +36,13 @@ class DataCollatorMimiCodecWithPadding:
         len_audio = torch.tensor([len(audio) for audio in audios], dtype=torch.int32)
         
         # Calculate max audio length in samples
-        max_ssl_pad_length = int(self.max_audio_length * self.ssl_sampling_rate)
+        max_ssl_pad_length = int(self.max_audio_length * ssl_sampling_rate)
         # Resample audio for SSL models
         audios_ssl = [
             torch.from_numpy(librosa.resample(
                 feature, 
                 orig_sr=self.sampling_rate, 
-                target_sr=self.ssl_sampling_rate
+                target_sr=ssl_sampling_rate
             ))
             for feature in audios
         ]

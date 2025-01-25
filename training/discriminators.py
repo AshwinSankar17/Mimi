@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
 
+import torchaudio
 import typing as tp
 
-import torchaudio
 import torch
 from torch import nn
+from torch.nn.utils.parametrizations import weight_norm
+
 from einops import rearrange
 
 from transformers.modeling_utils import PreTrainedModel
@@ -12,6 +14,8 @@ from transformers.modeling_utils import PreTrainedModel
 FeatureMapType = tp.List[torch.Tensor]
 LogitsType = torch.Tensor
 MultiDiscriminatorOutputType = tp.Tuple[tp.List[LogitsType], tp.List[FeatureMapType]]
+
+CONV_NORMALIZATIONS = ['weight_norm', 'spectral_norm', 'time_group_norm', 'none']
 
 def apply_parametrization_norm(module: nn.Module, norm: str = 'none'):
     assert norm in CONV_NORMALIZATIONS
@@ -118,7 +122,7 @@ class DiscriminatorSTFT(nn.Module):
                                          dilation=(dilation, 1), padding=get_2d_padding(config.kernel_size, (dilation, 1)),
                                          norm=config.norm))
             in_chs = out_chs
-        out_chs = min((filters_scale ** (len(dilations) + 1)) * self.filters, max_filters)
+        out_chs = min((config.filters_scale ** (len(config.dilations) + 1)) * self.filters, config.max_filters)
         self.convs.append(NormConv2d(in_chs, out_chs, kernel_size=(config.kernel_size[0], config.kernel_size[0]),
                                      padding=get_2d_padding((config.kernel_size[0], config.kernel_size[0])),
                                      norm=config.norm))
@@ -140,7 +144,7 @@ class DiscriminatorSTFT(nn.Module):
         return z, fmap
 
 
-class MultiScaleSTFTDiscriminator(PretrainedModel):
+class MultiScaleSTFTDiscriminator(PreTrainedModel):
     """Multi-Scale STFT (MS-STFT) discriminator.
 
     Args:
@@ -155,12 +159,12 @@ class MultiScaleSTFTDiscriminator(PretrainedModel):
     """
     def __init__(self, config):
         super().__init__(config)
-        assert len(config.n_ffts) == len(config.hop_lengths) == len(win_lengths)
+        assert len(config.n_ffts) == len(config.hop_lengths) == len(config.win_lengths)
         self.discriminators = nn.ModuleList([
             DiscriminatorSTFT(config, i)
             # DiscriminatorSTFT(config.filters, in_channels=config.in_channels, out_channels=config.out_channels,
             #                   n_fft=config.n_ffts[i], win_length=config.win_lengths[i], hop_length=config.hop_lengths[i], **kwargs)
-            for i in range(len(n_ffts))
+            for i in range(len(config.n_ffts))
         ])
 
     @property

@@ -32,6 +32,7 @@ class W2V2BertFeature(nn.Module):
         super(W2V2BertFeature, self).__init__()
         self.processor = AutoFeatureExtractor.from_pretrained(config.speech_encoder_model_name_or_path)
         self.model = Wav2Vec2BertModel.from_pretrained(config.speech_encoder_model_name_or_path)
+        self.sampling_rate = self.model.config.sampling_rate
         self.freeze()
 
     def freeze(self):
@@ -90,6 +91,7 @@ class IndicConformerFeature(nn.Module):
         """
         super(IndicConformerFeature, self).__init__()
         self.model = nemo_asr.models.ASRModel.from_pretrained(config.speech_encoder_model_name_or_path)
+        self.sampling_rate = 16_000
         self.freeze()
 
     def freeze(self):

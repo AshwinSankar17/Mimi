@@ -7,9 +7,9 @@ from src.configuration_mimi import MimiConfig
 configuration = MimiConfig()
 
 # Initializing a model (with random weights) from the "kyutai/mimi" style configuration
-model = MimiModel(configuration)
+model = MimiModel(configuration).to("cuda")
 
-audio, quantized = model(torch.rand(1, 1, 48_000))
+audio, quantized = model(torch.rand(1, 1, 48_000, device="cuda"), ssl_embeddings=torch.rand(1, 100, 1024, device="cuda"))
 
 def count_model_parameters(model):
     """
@@ -39,6 +39,9 @@ print(audio.shape)
 for x in quantized:
     if isinstance(x, torch.Tensor):
         print(x.shape)
+
+print("::::: Saving model to ./logs/first_checkpoint :::::")
+model.save_pretrained("logs/first_checkpoint")
 
 # Accessing the model configuration
 # configuration = model.config

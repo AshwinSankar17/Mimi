@@ -191,6 +191,10 @@ class MimiCodecTrainingArguments(Seq2SeqTrainingArguments):
         default=96,
         metadata={"help": ("Specify the batch size of the audio encoding pre-processing steps.")},
     )
+    discriminator_warm_up_steps: int = field(
+        default=1,
+        metadata={"help": ("Warm up the discriminator against a pre-trained model to speed-up training quickly.")},
+    )
     train_dataloader_num_workers: Optional[int] = field(
         default=8,
         metadata={

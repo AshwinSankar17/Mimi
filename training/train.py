@@ -44,7 +44,14 @@ from training.data import load_multiple_datasets, DataCollatorMimiCodecWithPaddi
 from training.arguments import ModelArguments, DataArguments, MimiCodecTrainingArguments, DiscriminatorArguments
 
 from training.discriminators import MultiScaleSTFTDiscriminator
-from training.losses import AdversarialLoss, get_adv_criterion, get_fake_criterion, get_real_criterion, FeatureMatchingLoss, MelSpectrogramL1Loss
+from training.losses import (
+    AdversarialLoss, 
+    get_adv_criterion, 
+    get_fake_criterion, 
+    get_real_criterion, 
+    FeatureMatchingLoss, 
+    MelSpectrogramL1Loss
+)
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +529,30 @@ def main():
             accelerator.wait_for_everyone()
         
         train_iterator = iter(train_dataloader)
+        discriminator_warm_up_steps = training_args.discriminator_warm_up_steps
+
+        while discriminator_warm_up_steps > 0:
+            # preload the total batch per step
+            batch_samples = []
+            num_batches_in_step = gradient_accumulation_steps
+            for _ in range(num_batches_in_step):
+                batch_samples += [next(train_iterator)]
+
+            # warm-up discriminator
+            
+            for i, batch in enumerate(batch_samples):
+                ctx = model.no_sync if (i < len(batch_samples) - 1 and accelerator.num_processes > 1) else contextlib.nullcontext
+                with ctx():
+                    disc_loss = train_step_discriminator(batch, accelerator)
+                    disc_loss = disc_loss / gradient_accumulation_steps
+                    accelerator.backward(disc_loss)
+            discriminator_optimizer.step()
+            discriminator_optimizer.zero_grad()
+
+            discriminator_warm_up_steps -= 1
+                
+
+        train_iterator = iter(train_dataloader)
         num_steps_in_epoch = len(train_dataloader)
         remainder = num_steps_in_epoch % gradient_accumulation_steps
         remainder = remainder if remainder != 0 else gradient_accumulation_steps
@@ -536,17 +567,6 @@ def main():
             num_batches_in_step = gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
             for _ in range(num_batches_in_step):
                 batch_samples += [next(train_iterator)]
-
-            # warm-up discriminator
-            if update_step == 1:
-                discriminator_optimizer.zero_grad()
-                for i, batch in enumerate(batch_samples):
-                    ctx = model.no_sync if (i < len(batch_samples) - 1 and accelerator.num_processes > 1) else contextlib.nullcontext
-                    with ctx():
-                        disc_loss = train_step_discriminator(batch, accelerator)
-                        disc_loss = disc_loss / gradient_accumulation_steps
-                        accelerator.backward(disc_loss)
-                discriminator_optimizer.step()
 
             losses = {
                 "gen_loss": [],

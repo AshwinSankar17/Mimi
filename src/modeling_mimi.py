@@ -115,9 +115,8 @@ def semantic_distillation_loss_fn(feature, target_feature):
         target_feature: B, T, D - Teacher model features
     """
     n = min(feature.size(1), target_feature.size(1))
-    
     # Directly use cosine similarity without sigmoid
-    cos_sim = F.cosine_similarity(feature[:, :n], target_feature[:, :n], dim=1)
+    cos_sim = nn.functional.cosine_similarity(feature[:, :n], target_feature[:, :n], dim=1)
     
     # Use 1 - cosine similarity to create a loss (minimizing distance)
     distill_loss = (1 - cos_sim).mean()
@@ -1699,8 +1698,8 @@ class MimiSplitResidualVectorQuantizer(nn.Module):
         if self.training and semantic_features_target is not None:
             semantic_embeddings_target = self.semantic_teacher(semantic_features_target, semantic_features_mask)
             semantic_distillation_loss = semantic_distillation_loss_fn(
-                semantic_features_res[0], 
-                semantic_embeddings_target
+                semantic_features_res[0].transpose(1, 2), 
+                semantic_embeddings_target.transpose(1, 2)
             )
 
         if self.max_num_quantizers == self.num_semantic_quantizers:

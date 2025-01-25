@@ -1,0 +1,11 @@
+{
+    "model_name_or_path": "/home/tts/ttsteam/repos/Mimi/logs/pretrained_model",
+    "discriminator_model_name_or_path": "/home/tts/ttsteam/repos/Mimi/logs/pretrained_model/discriminator",
+    "attn_implementation": "flex_attention",
+    "ssl_model_name_or_path": "facebook/w2v-bert-2.0",
+    
+    
+    "sampling_rate": 24000,
+    "ssl_sampling_rate": 16000,
+    "train_dataset_name": "espnet/yodas2+ylacombe/cml-tts+MushanW/GLOBE"
+}
