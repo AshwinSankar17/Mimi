@@ -151,22 +151,22 @@ class AdversarialLoss(nn.Module):
 
         return loss
 
-    @self.adversary.no_sync()
     def generator_fwd(self, fake: torch.Tensor, real: torch.Tensor) -> tp.Tuple[torch.Tensor, torch.Tensor]:
         """Return the loss for the generator, i.e. trying to fool the adversary,
         and feature matching loss if provided.
         """
-        adv = torch.tensor(0., device=fake.device)
-        feat = torch.tensor(0., device=fake.device)
-        with readonly(self.adversary):
-            all_logits_fake_is_fake, all_fmap_fake = self.get_adversary_pred(fake)
-            all_logits_real_is_fake, all_fmap_real = self.get_adversary_pred(real)
-            n_sub_adversaries = len(all_logits_fake_is_fake)
-            for logit_fake_is_fake in all_logits_fake_is_fake:
-                adv += self.loss(logit_fake_is_fake)
-            if self.loss_feat:
-                for fmap_fake, fmap_real in zip(all_fmap_fake, all_fmap_real):
-                    feat += self.loss_feat(fmap_fake, fmap_real)
+        with self.adversary.no_sync():
+            adv = torch.tensor(0., device=fake.device)
+            feat = torch.tensor(0., device=fake.device)
+            with readonly(self.adversary):
+                all_logits_fake_is_fake, all_fmap_fake = self.get_adversary_pred(fake)
+                all_logits_real_is_fake, all_fmap_real = self.get_adversary_pred(real)
+                n_sub_adversaries = len(all_logits_fake_is_fake)
+                for logit_fake_is_fake in all_logits_fake_is_fake:
+                    adv += self.loss(logit_fake_is_fake)
+                if self.loss_feat:
+                    for fmap_fake, fmap_real in zip(all_fmap_fake, all_fmap_real):
+                        feat += self.loss_feat(fmap_fake, fmap_real)
 
         if self.normalize:
             adv /= n_sub_adversaries

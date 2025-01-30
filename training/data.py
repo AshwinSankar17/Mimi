@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Union, Callable
 
 import torch
 import librosa
@@ -14,11 +14,37 @@ from semantic_features import mask_from_lens, W2V2BertFeature
 
 
 @dataclass
+class DataCollatorPreprocessingWithPadding:
+    feature_extractor: Callable
+    audio_column_name: str
+
+    def __call__(self, batch):
+        audios = [
+            librosa.resample(
+                feature[self.audio_column_name]["array"], 
+                feature[self.audio_column_name]["sampling_rate"], 
+                self.feature_extractor.sampling_rate
+            ) 
+            for feature in batch
+        ]
+
+        return {
+            **self.feature_extractor(
+                audios, 
+                sampling_rate=self.feature_extractor.sampling_rate, 
+                padding="longest", 
+                return_tensors="pt"
+            )
+        }
+
+
+
+@dataclass
 class DataCollatorMimiCodecWithPadding:
     audio_column_name: str
+    ssl_feature_extractor: Callable
     max_audio_length: float = 12.0
     sampling_rate: int = 24_000
-    semantic_feature_model: torch.nn.Module
     # ssl_sampling_rate: int = 16_000
 
     def __call__(self, batch: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
@@ -26,48 +52,30 @@ class DataCollatorMimiCodecWithPadding:
         assert self.sampling_rate == batch[0][self.audio_column_name]["sampling_rate"], (
             "Given sampling rate and audio column sampling rate do not match"
         )
-        ssl_sampling_rate = semantic_feature_model.sampling_rate
-        
         # Calculate max audio length in samples
         max_audio_pad_length = int(self.max_audio_length * self.sampling_rate)
         
         # Extract and truncate audio arrays
         audios = [torch.from_numpy(feature[self.audio_column_name]["array"][:max_audio_pad_length]) for feature in batch]
         len_audio = torch.tensor([len(audio) for audio in audios], dtype=torch.int32)
-        
-        # Calculate max audio length in samples
-        max_ssl_pad_length = int(self.max_audio_length * ssl_sampling_rate)
-        # Resample audio for SSL models
+
         audios_ssl = [
             torch.from_numpy(librosa.resample(
-                feature, 
+                feature.numpy(), 
                 orig_sr=self.sampling_rate, 
-                target_sr=ssl_sampling_rate
+                target_sr=self.ssl_feature_extractor.sampling_rate
             ))
             for feature in audios
         ]
-
-        # ssl_len_audio = torch.tensor([len(audio) for audio in audios_ssl], dtype=torch.int32)
         
-        # Pad audios and audios_ssl
-        def pad_sequences(sequences, max_length, pad_value=0.0):
-            padded = torch.full((len(sequences), max_length), pad_value, dtype=torch.float32)
-            for i, seq in enumerate(sequences):
-                length = min(len(seq), max_length)
-                padded[i, :length] = torch.tensor(seq[:length], dtype=torch.float32)
-            return padded
-
-        # Apply padding
-        audios_padded = pad_sequences(audios, max_audio_pad_length)
+        audios_padded = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True)
         audios_padding_mask = mask_from_lens(len_audio)
-        ssl_embeddings, ssl_padding_mask = self.semantic_feature_model(audios_ssl)
         
         # Return as dictionary
         return {
-            "input_values": audios_padded,
-            "input_padding_mask": audios_padding_mask,
-            "ssl_embeddings": ssl_embeddings,
-            "ssl_padding_mask": ssl_padding_mask,
+            "input_values": audios_padded.float().unsqueeze(1),
+            "padding_mask": audios_padding_mask,
+            **self.ssl_feature_extractor(audios_ssl, sampling_rate=self.ssl_feature_extractor.sampling_rate, return_tensors="pt")
         }
 
 
@@ -133,7 +141,6 @@ def load_multiple_datasets(
     seed: Optional[int] = None,
     id_column_name: Optional[str] = None,
     columns_to_keep: Optional[Set[str]] = None,
-    prompt_column_name: Optional[str] = None,
     sampling_rate: Optional[int] = None,
     audio_column_name: Optional[str] = None,
     logger: Optional[logging.Logger] = None,

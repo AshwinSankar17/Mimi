@@ -1,2 +1,6 @@
 __pycache__
 logs
+configs/v1_pilot.json
+init_model.py
+init_discriminator.py
+*.egg-info

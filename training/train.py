@@ -11,23 +11,26 @@ from tqdm import tqdm
 from pathlib import Path
 from collections.abc import Iterable
 
-
 import torch
 from torch.utils.data import DataLoader
 
 import datasets
 from datasets import DatasetDict, Dataset, IterableDataset, concatenate_datasets
 
+import transformers
+from transformers import AutoFeatureExtractor, Wav2Vec2BertModel
 from transformers import HfArgumentParser
 from torch.utils.data.distributed import DistributedSampler
 from transformers.optimization import get_scheduler
 from transformers.utils import send_example_telemetry
 
+import bitsandbytes as bnb
+
 from accelerate import Accelerator, skip_first_batches
-from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin
+from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin, DistributedDataParallelKwargs
 from accelerate.utils.memory import release_memory
 
-from src import MimiConfig, MimiModel
+from mimi import MimiConfig, MimiModel
 
 from training.utils import (
     get_last_checkpoint,
@@ -39,10 +42,10 @@ from training.utils import (
     get_last_codec_checkpoint_step,
 )
 
-from training.semantic_features import W2V2BertFeature, IndicConformerFeature
-from training.data import load_multiple_datasets, DataCollatorMimiCodecWithPadding
+from training.semantic_features import W2V2BertFeature #, IndicConformerFeature
+from training.data import load_multiple_datasets, DataCollatorMimiCodecWithPadding, DataCollatorPreprocessingWithPadding
 from training.arguments import ModelArguments, DataArguments, MimiCodecTrainingArguments, DiscriminatorArguments
-
+from training.discriminator_config import DiscriminatorConfig
 from training.discriminators import MultiScaleSTFTDiscriminator
 from training.losses import (
     AdversarialLoss, 
@@ -103,12 +106,10 @@ def main():
             "mixed_precision": mixed_precision,
             "lr_scheduler_type": training_args.lr_scheduler_type,
             "warmup_steps": training_args.warmup_steps,
-            "freeze_text_encoder": model_args.freeze_text_encoder,
             "max_duration_in_seconds": data_args.max_duration_in_seconds,
             "weight_decay": training_args.weight_decay,
             "adam_beta1": training_args.adam_beta1,
             "adam_beta2": training_args.adam_beta2,
-            "temperature": model_args.temperature,
         },
         init_kwargs={"wandb": {"name": data_args.wandb_run_name}} if data_args.wandb_run_name else {},
     )
@@ -159,17 +160,13 @@ def main():
 
     columns_to_keep = {
         "target_audio_column_name": data_args.target_audio_column_name,
-        "prompt_column_name": data_args.prompt_column_name,
     }
-    if data_args.description_column_name is not None:
-        columns_to_keep["description_column_name"] = data_args.description_column_name
-
+    
     if training_args.do_train:
         raw_datasets["train"] = load_multiple_datasets(
             accelerator,
             data_args.train_dataset_name,
             data_args.train_dataset_config_name,
-            metadata_dataset_names=data_args.train_metadata_dataset_name,
             splits=data_args.train_split_name,
             dataset_samples=data_args.train_dataset_samples,
             seed=training_args.seed,
@@ -177,11 +174,11 @@ def main():
             num_proc=data_args.preprocessing_num_workers,
             id_column_name=data_args.id_column_name,
             columns_to_keep=columns_to_keep.values(),
-            prompt_column_name=data_args.prompt_column_name,
             audio_column_name=data_args.target_audio_column_name,
             sampling_rate=data_args.sampling_rate,
             logger=logger,
             streaming=data_args.streaming, #TODO(SG): optionally enable streaming mode
+            trust_remote_code=data_args.trust_remote_code,
         )
 
         for key in columns_to_keep:
@@ -203,17 +200,16 @@ def main():
             data_args.eval_dataset_config_name
             if data_args.eval_dataset_config_name
             else data_args.train_dataset_config_name,
-            metadata_dataset_names=data_args.eval_metadata_dataset_name,
             splits=data_args.eval_split_name,
             cache_dir=model_args.cache_dir,
             num_proc=data_args.preprocessing_num_workers,
             id_column_name=data_args.id_column_name,
             columns_to_keep=columns_to_keep.values(),
-            prompt_column_name=data_args.prompt_column_name,
             audio_column_name=data_args.target_audio_column_name,
             sampling_rate=data_args.sampling_rate,
             logger=logger,
             streaming=data_args.streaming, #TODO(SG): optionally enable streaming mode
+            trust_remote_code=data_args.trust_remote_code,
         )
 
         if data_args.max_eval_samples is not None:
@@ -236,11 +232,10 @@ def main():
         config=config,
         token=data_args.token,
         trust_remote_code=data_args.trust_remote_code,
-        _attn_implementation=model_args._attn_implementation
     )
 
     discriminator_config = DiscriminatorConfig.from_pretrained(
-        model_args.discriminator_model_name_or_path
+        model_args.discriminator_model_name_or_path,
         cache_dir=model_args.cache_dir,
         token=data_args.token,
         trust_remote_code=data_args.trust_remote_code,
@@ -275,21 +270,91 @@ def main():
     print("gathered_tensor", gathered_tensor)
     accelerator.wait_for_everyone()
 
+
+    def get_audio_length(sample):
+        sample["lengths"] = len(sample[data_args.target_audio_column_name])
+        return sample
+
     with accelerator.local_main_process_first():
+        raw_datasets = raw_datasets.map(get_audio_length, num_proc=num_workers)
         # filter description that is shorter than max_text_length
         raw_datasets = raw_datasets.filter(
             lambda x: len(x["array"]) > data_args.min_duration_in_seconds,
             num_proc=num_workers,
-            input_columns=[target_audio_column_name],
+            input_columns=[data_args.target_audio_column_name],
         )
 
-    if "w2v-bert2.0" in model_args.ssl_model_name_or_path:
-        ssl_model = W2V2BertFeature(model_args.ssl_model_name_or_path)
-    elif "MahaDhwani_pretrained_conformer" in model_args.ssl_model_name_or_path:
-        ssl_model = IndicConformerFeature(model_args.ssl_model_name_or_path)
 
+    ####### B. Encode audio
+    logger.info("*** Encode target audio with encodec ***")
+
+    # ssl_model = W2V2BertFeature(model_args.ssl_model_name_or_path)
+    ssl_model = Wav2Vec2BertModel.from_pretrained(model_args.ssl_model_name_or_path)
+    for param in ssl_model.parameters():
+        param.requires_grad = False
+    ssl_model.eval()
+    # no need to prepare audio_decoder because used for inference without mixed precision
+    # see: https://huggingface.co/docs/accelerate/main/en/package_reference/accelerator#accelerate.Accelerator.prepare
     if training_args.torch_compile:
-        ssl_model = accelerator.prepare_model(ssl_model, evaluation_mode=True)
+        ssl_model = accelerator.prepare(ssl_model, evaluation_mode=True)
+        
+    ssl_feature_extractor = AutoFeatureExtractor.from_pretrained(model_args.ssl_model_name_or_path)
+
+    def apply_audio_preprocessing(batch, rank):
+        device = f"cuda:{(rank or 0) % torch.cuda.device_count()}"
+        ssl_model.to(device)
+
+        audios_list = [sample['array'] for sample in batch['audio_16k']]
+        inputs = ssl_feature_extractor(
+            sampling_rate=self.feature_extractor.sampling_rate, 
+            padding="longest",
+            return_tensors="pt"
+        ).to(device)
+
+        with torch.no_grad():
+            embeddings = ssl_model(**inputs)['last_hidden_state']
+
+        lengths = inputs['attention_mask'].sum(dim=1).tolist()  # List of lengths for each batch element
+
+        # Step 2: Slice embeddings and convert to CPU tensors
+        embeddings_list = [
+            embeddings[i, :lengths[i], :].cpu()  # Slice valid token embeddings and move to CPU
+            for i in range(len(lengths))
+        ]
+        batch['ssl_embeddings'] = embeddings_list
+        return batch
+
+    def resample_audio(batch):
+        batch["audio_16k"] = batch["audio"]
+        return batch
+
+    # Map the function to add the new column
+    if accelerator.is_main_process:
+        raw_datasets = raw_datasets.map(resample_audio, num_proc=32, batched=True, batch_size=64).cast_column("audio_16k", datasets.Audio(sampling_rate=16_000))
+        raw_datasets.map(
+            apply_audio_preprocessing,
+            batched=True,
+            batch_size=32,
+            with_rank=True,
+            num_proc=accelerator.num_processes
+        )
+        print(raw_datasets['train'][0])
+        exit()
+        raw_datasets.save_to_disk("./tmp_dataset_dir")
+    accelerator.wait_for_everyone()
+    with accelerator.local_main_process_first():
+        raw_datasets = load_from_disk("./tmp_dataset_dir")
+    accelerator.wait_for_everyone()
+    print(raw_datasets['train'][0])
+    exit()
+
+    # if "w2v-bert2.0" in model_args.ssl_model_name_or_path:
+    #     ssl_model = W2V2BertFeature(model_args.ssl_model_name_or_path)
+    # elif "MahaDhwani_pretrained_conformer" in model_args.ssl_model_name_or_path:
+    #     ssl_model = IndicConformerFeature(model_args.ssl_model_name_or_path)
+
+    # if training_args.torch_compile:
+    #     ssl_model = accelerator.prepare_model(ssl_model, evaluation_mode=True)
 
     # Define Training Schedule
     # Store some constants
@@ -318,22 +383,20 @@ def main():
     # autocast_kwargs = AutocastKwargs(enabled=(mixed_precision in ("fp16", "bf16")))
 
     # Define optimizer, LR scheduler, collator
-    generator_optimizer = torch.optim.AdamW(
+    generator_optimizer = bnb.optim.AdamW8bit(
         params=model.parameters(),
         lr=training_args.learning_rate,
         betas=(training_args.adam_beta1, training_args.adam_beta2),
         eps=training_args.adam_epsilon,
         weight_decay=training_args.weight_decay,
-        fused=True
     )
 
-    discriminator_optimizer = torch.optim.AdamW(
+    discriminator_optimizer = bnb.optim.AdamW8bit(
         params=discriminator.parameters(),
         lr=training_args.learning_rate,
         betas=(training_args.adam_beta1, training_args.adam_beta2),
         eps=training_args.adam_epsilon,
         weight_decay=training_args.weight_decay,
-        fused=True
     )
 
     # LR scheduler gets stepped by `num_processes` each time -> account for this in warmup / total steps
@@ -354,23 +417,25 @@ def main():
     # Instantiate custom data collator
     data_collator = DataCollatorMimiCodecWithPadding(
         data_args.target_audio_column_name,
+        ssl_feature_extractor,
         max_audio_length=data_args.max_duration_in_seconds,
         sampling_rate=data_args.sampling_rate,
-        semantic_feature_model=ssl_model
     )
 
     # Prepare everything with accelerate
     (
         model, 
-        discriminator, 
-        generator_lr_scheduler, 
+        adversarial_loss,
+        ssl_model, 
+        generator_optimizer, 
         discriminator_optimizer, 
         generator_lr_scheduler, 
         discriminator_lr_scheduler
     ) = accelerator.prepare(
         model, 
-        discriminator, 
-        generator_lr_scheduler, 
+        adversarial_loss, 
+        ssl_model,
+        generator_optimizer, 
         discriminator_optimizer, 
         generator_lr_scheduler, 
         discriminator_lr_scheduler
@@ -451,25 +516,41 @@ def main():
         resume_step = None
 
     def train_step_discriminator(batch, accelerator, generator_samples=None):
-        with accelerator.autocast():
+        with accelerator.autocast(autocast_handler=AutocastKwargs(enabled=False)):
             if generator_samples is None:
-                generator_samples = model(**batch)
+                codec_inputs = {
+                    "input_values": batch["input_values"],
+                    "padding_mask": batch["padding_mask"],
+                }
+                # print(batch['input_values'].device, batch['input_values'].dtype)
+                generator_samples, quantized = model(**codec_inputs)
             
             disc_loss = adversarial_loss.discriminator_fwd(generator_samples, batch['input_values'])
 
         return disc_loss
     
     def train_step_generator(batch, accelerator):
-        with accelerator.autocast():
-            generator_samples, quantized = model(**batch)
+        with accelerator.autocast(autocast_handler=AutocastKwargs(enabled=False)):
+            semantic_inputs = {
+                "input_features": batch["input_features"],
+                "attention_mask": batch["attention_mask"]
+            }
+            semantic_features_target = ssl_model(**semantic_inputs)
 
+            codec_inputs = {
+                "input_values": batch["input_values"],
+                "padding_mask": batch["padding_mask"],
+                "target_embeddings": semantic_features_target.last_hidden_state
+            }
+            generator_samples, quantized = model(**codec_inputs)
+            distillation_loss = quantized[2][1]
             mel_l1_loss = mel_loss(audio_batch, batch['input_values'])
             gen_loss, fm_loss = adversarial_loss.generator_fwd(generator_samples, batch['input_values'])
 
             gen_loss *= 4.0
             fm_loss *= 4.0
         
-        return gen_loss, fm_loss, mel_l1_loss, generator_samples
+        return gen_loss, fm_loss, distillation_loss, mel_l1_loss, generator_samples
 
     def _reduce(metrics):
         for key, value in metrics.items():
@@ -479,8 +560,12 @@ def main():
 
     @torch.no_grad()
     def eval_step(batch, accelerator):
-        with accelerator.autocast():
-            audio_batch, quantized = model(**batch)
+        with accelerator.autocast(autocast_handler=AutocastKwargs(enabled=False)):
+            codec_inputs = {
+                "input_values": batch["input_values"],
+                "padding_mask": batch["padding_mask"],
+            }
+            audio_batch, quantized = model(**codec_inputs)
 
             mel_l1_loss = mel_loss(audio_batch, batch['input_values'])
 
@@ -507,13 +592,12 @@ def main():
     for epoch in range(epochs_trained, num_epochs):
         with accelerator.local_main_process_first():
             raw_datasets["train"] = raw_datasets["train"].shuffle(training_args.seed)
-        sampler = DistributedSampler(raw_datasets["train"])
+        sampler = DistributedSampler(raw_datasets["train"], shuffle=True)
         train_dataloader = DataLoader(
             raw_datasets["train"],
             collate_fn=data_collator,
             batch_size=per_device_batch_size,
             sampler=sampler,
-            shuffle=True,
             num_workers=training_args.dataloader_num_workers,
             pin_memory=training_args.dataloader_pin_memory,
         )
@@ -545,6 +629,7 @@ def main():
                 with ctx():
                     disc_loss = train_step_discriminator(batch, accelerator)
                     disc_loss = disc_loss / gradient_accumulation_steps
+                    batch = release_memory(batch)
                     accelerator.backward(disc_loss)
             discriminator_optimizer.step()
             discriminator_optimizer.zero_grad()
@@ -581,17 +666,19 @@ def main():
 
                 with ctx():
                     ## Generator
-                    gen_loss, fm_loss, mel_l1_loss, generated_batch = train_step_generator(batch, accelerator)
-                    loss = gen_loss + fm_loss
+                    gen_loss, fm_loss, distillation_loss, mel_l1_loss, generated_batch = train_step_generator(batch, accelerator)
+                    loss = gen_loss + fm_loss + distillation_loss
                     accelerator.backward(loss)
 
                     ## Discriminator
                     disc_loss = train_step_discriminator(batch, accelerator, generated_batch)
+                    batch = release_memory(batch)
                     accelerator.backward(disc_loss)
 
                     # tracking
                     losses["gen_loss"].append(gen_loss.detach().item())
                     losses["fm_loss"].append(fm_loss.detach().item())
+                    losses["distillation_loss"].append(distillation_loss.detach().item())
                     losses["mel_loss"].append(mel_loss.detach().item())
                     losses["loss"].append(loss.detach().item())
                     losses["disc_loss"].append(disc_loss.detach().item())
@@ -718,7 +805,7 @@ def main():
                 model.train()
                 discriminator.train()
 
-                 train_start = time.time()
+                train_start = time.time()
 
             # break condition
             if cur_step == total_train_steps:

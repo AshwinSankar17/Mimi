@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
-from transformers import TrainingArguments
+from transformers import Seq2SeqTrainingArguments
 
 
 @dataclass
@@ -16,14 +16,17 @@ class ModelArguments:
     discriminator_model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models for discriminator"}
     )
-    attn_implementation: str = field(
-        default="flex",
-        metadata={"help": "Attention implementation used. One of `eager`, `sdpa`, `flash_attention_2`, `flex`"},
-    )
     ssl_model_name_or_path: Optional[str] = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-
+    attn_implementation: str = field(
+        default="flex_attention",
+        metadata={"help": "Attention implementation used. One of `eager`, `sdpa`, `flash_attention_2`, `flex`"},
+    )
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Where to store the pretrained models downloaded from huggingface.co"},
+    )
 
 @dataclass
 class DataArguments:
@@ -122,7 +125,7 @@ class DataArguments:
         },
     )
     max_duration_in_seconds: float = field(
-        default=7.0,
+        default=12.0,
         metadata={
             "help": (
                 "Clip audio files that are longer than `max_duration_in_seconds` seconds to 'max_duration_in_seconds`."
@@ -142,7 +145,7 @@ class DataArguments:
         },
     )
     trust_remote_code: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": (
                 "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option "
@@ -152,7 +155,7 @@ class DataArguments:
         },
     )
     streaming: bool = field(
-        default=True,
+        default=False,
         metadata={
             "help": (
                 "Whether or not to load the datasets in streaming mode."

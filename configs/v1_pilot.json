@@ -15,17 +15,17 @@
     "sampling_rate": 24000,
     "ssl_sampling_rate": 16000,
 
-    "train_dataset_name": "ylacombe/libritts_r_filtered+ylacombe/libritts_r_filtered+ylacombe/libritts_r_filtered+espnet/yodas2+espnet/yodas2+MushanW/GLOBE",
-    "train_dataset_config_name": "clean+clean+other+en000+en001+default",
-    "train_split_name": "train.clean.360+train.clean.100+train.other.500+train+train+train",
+    "train_dataset_name": "ylacombe/libritts_r_filtered",
+    "train_dataset_config_name": "clean",
+    "train_split_name": "train.clean.360",
     
-    "eval_dataset_name": "ylacombe/libritts_r_filtered+MushanW/GLOBE",
-    "eval_dataset_config_name": "other+test",
-    "eval_split_name": "test.other+test",
+    "eval_dataset_name": "ylacombe/libritts_r_filtered",
+    "eval_dataset_config_name": "other",
+    "eval_split_name": "test.other",
 
     "target_audio_column_name": "audio",
     "id_column_name": "id",
-    "max_eval_samples": 96,
+    "max_eval_samples": 1,
 
     "group_by_length": true,
 
@@ -35,7 +35,7 @@
     "num_train_epochs": 30,
     "gradient_accumulation_steps": 1,
     "gradient_checkpointing": false,
-    "per_device_train_batch_size": 10,
+    "per_device_train_batch_size": 1,
     "learning_rate": 0.00095,
     "adam_beta1": 0.9,
     "adam_beta2": 0.99,
@@ -50,10 +50,10 @@
     "eval_steps": 10000,
     "save_steps": 10000,
 
-    "per_device_eval_batch_size": 4,
+    "per_device_eval_batch_size": 1,
 
-    "dtype": "float32",
+    "dtype": "bfloat16",
     "seed": 456,
 
-    "dataloader_num_workers":4
+    "dataloader_num_workers":8
 }

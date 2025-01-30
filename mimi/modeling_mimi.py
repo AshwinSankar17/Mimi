@@ -25,6 +25,7 @@ from torch import nn
 
 from einops import rearrange, repeat
 
+from transformers import AutoFeatureExtractor, Wav2Vec2BertModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
@@ -42,6 +43,8 @@ from transformers.utils import (
 from .configuration_mimi import MimiConfig
 
 from accelerate.utils import broadcast as broadcast_tensors
+
+import torchaudio as ta
 
 
 if is_flash_attn_2_available():
@@ -536,17 +539,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 def eager_attention_forward(
-    config: MimiConfig,
+    module: torch.nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     mask: Optional[torch.Tensor],
     **_kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    key_states = repeat_kv(key, config.num_key_value_groups)
-    value_states = repeat_kv(value, config.num_key_value_groups)
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
 
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * config.scaling
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * module.scaling
 
     if mask is not None:  # no matter the length, we just slice it
         causal_mask = mask[:, :, :, : key_states.shape[-2]]
@@ -554,14 +557,14 @@ def eager_attention_forward(
 
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=config.attention_dropout, training=config.training)
+    attn_weights = nn.functional.dropout(attn_weights, p=module.config.attention_dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
 
 def flash_attention_forward(
-    config: MimiConfig,
+    module: torch.nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -580,7 +583,7 @@ def flash_attention_forward(
     key_states = key.transpose(1, 2)
     value_states = value.transpose(1, 2)
 
-    dropout_rate = config.attention_dropout if config.training else 0.0
+    dropout_rate = module.config.attention_dropout if module.training else 0.0
 
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
@@ -595,17 +598,17 @@ def flash_attention_forward(
         mask,
         seq_len,
         dropout=dropout_rate,
-        softmax_scale=config.scaling,
-        is_causal=config.is_causal,
-        sliding_window=config.sliding_window,
-        use_top_left_mask=config._flash_attn_uses_top_left_mask,
+        softmax_scale=module.scaling,
+        is_causal=module.config.is_causal,
+        sliding_window=module.sliding_window,
+        use_top_left_mask=module.config._flash_attn_uses_top_left_mask,
     )
 
     return attn_output, None
 
 
 def flex_attention_forward(
-    config: MimiConfig,
+    module: torch.nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -619,7 +622,7 @@ def flex_attention_forward(
     def sliding_window_causal_bias(score, b, h, q_idx, kv_idx):
         causal_mask = q_idx >= kv_idx
         windowed_mask = (
-            q_idx - kv_idx <= config.sliding_window
+            q_idx - kv_idx <= module.sliding_window
         )  # We dont need to check the right side of the sliding window since we are applying the causal mask
 
         return torch.where(causal_mask & windowed_mask, score, -float("inf"))
@@ -630,7 +633,7 @@ def flex_attention_forward(
         value,
         score_mod=sliding_window_causal_bias,
         enable_gqa=True,
-        scale=config.scaling,
+        scale=module.scaling,
         return_lse=output_attentions,
     )
     if not output_attentions:
@@ -643,15 +646,15 @@ def flex_attention_forward(
 
 
 def sdpa_attention_forward(
-    config: MimiConfig,
+    module: torch.nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     mask: Optional[torch.Tensor],
     **_kwargs,
 ) -> Tuple[torch.Tensor, None]:
-    key = repeat_kv(key, config.num_key_value_groups)
-    value = repeat_kv(value, config.num_key_value_groups)
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
 
     causal_mask = mask
     if mask is not None:
@@ -673,15 +676,15 @@ def sdpa_attention_forward(
         key,
         value,
         attn_mask=causal_mask,
-        dropout_p=config.attention_dropout if config.training else 0.0,
+        dropout_p=module.config.attention_dropout if module.training else 0.0,
         is_causal=is_causal,
-        scale=config.scaling,
+        scale=module.scaling,
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, None
 
 MIMI_ATTENTION_FUNCTION = {
-    "flex": flex_attention_forward,
+    "flex_attention": flex_attention_forward,
     "eager": eager_attention_forward,
     "flash_attention_2": flash_attention_forward,
     "sdpa": sdpa_attention_forward,
@@ -1269,11 +1272,9 @@ class MimiSemanticPooling(nn.Module):
         self.adapter = nn.Conv1d(config.semantic_feature_dim, config.hidden_size, 1)
         self.pooling = nn.AvgPool1d(kernel_size=config.pooling_kernel_size, stride=config.pooling_stride)
     
-    def forward(self, semantic_features, semantic_features_mask):
+    def forward(self, semantic_features):
         B, T, C = semantic_features.shape
-        if not semantic_features_mask:
-            semantic_features_mask = torch.ones(B, T, device=semantic_features.device).bool()
-        out = self.adapter(semantic_features.transpose(1, 2)) * semantic_features_mask.unsqueeze(1)
+        out = self.adapter(semantic_features.transpose(1, 2))
         out = self.pooling(out)
         return out
 
@@ -1420,7 +1421,9 @@ class MimiEuclideanCodebook(nn.Module):
             if self.initialized:
                 metrics['rvq_entropy'] = _compute_entropy(self.cluster_usage) / math.log(self.codebook_size)
             
-            embed_sum = torch.zeros_like(self.embed_sum)
+            embed_sum = torch.zeros_like(self.embed_sum).to(hidden_states.dtype)
+            # embed_sum.scatter_add_(0, repeat(flat_embed_ind, "n -> n d", d=self.codebook_dim), hidden_states)
+            
             embed_sum.scatter_add_(0, flat_embed_ind.unsqueeze(-1).repeat(1, self.codebook_dim), hidden_states)
             _ema_inplace(self.embed_sum, embed_sum, self.decay)
             self.register_buffer("_embed", None)
@@ -1690,16 +1693,15 @@ class MimiSplitResidualVectorQuantizer(nn.Module):
     def forward(
         self, 
         embeddings: torch.Tensor, 
-        semantic_features_target: Optional[torch.Tensor] = None, 
-        semantic_features_mask: Optional[torch.Tensor] = None
+        target_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         semantic_features_res = self.semantic_residual_vector_quantizer(embeddings)
         semantic_distillation_loss = torch.tensor(0.0, device=embeddings.device)
-        if self.training and semantic_features_target is not None:
-            semantic_embeddings_target = self.semantic_teacher(semantic_features_target, semantic_features_mask)
+        if self.training and target_features is not None:
+            target_features = self.semantic_teacher(target_features)
             semantic_distillation_loss = semantic_distillation_loss_fn(
                 semantic_features_res[0].transpose(1, 2), 
-                semantic_embeddings_target.transpose(1, 2)
+                target_features.transpose(1, 2)
             )
 
         if self.max_num_quantizers == self.num_semantic_quantizers:
@@ -2079,8 +2081,7 @@ class MimiModel(MimiPreTrainedModel):
         self,
         input_values: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
-        ssl_embeddings: Optional[torch.Tensor] = None,
-        ssl_padding_mask: Optional[torch.Tensor] = None,
+        target_embeddings: Optional[torch.Tensor] = None,
         num_quantizers: Optional[int] = None,
         audio_codes: Optional[torch.Tensor] = None,
         encoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
@@ -2120,7 +2121,7 @@ class MimiModel(MimiPreTrainedModel):
         embeddings = encoder_outputs[0].transpose(1, 2)
         embeddings = self.downsample(embeddings)
 
-        quantized = self.quantizer(embeddings, semantic_features_target=ssl_embeddings, semantic_features_mask=ssl_padding_mask)
+        quantized = self.quantizer(embeddings, target_features=target_embeddings)
 
         embeddings = self.upsample(quantized[0])
         decoder_outputs = self.decoder_transformer(embeddings.transpose(1, 2))
@@ -2131,3 +2132,60 @@ class MimiModel(MimiPreTrainedModel):
             audio_values = audio_values[..., : padding_mask.shape[-1]]
 
         return audio_values, quantized
+
+
+class MimiModelForTraining(nn.Module):
+    def __init__(self, model, ssl_model_name_or_path):
+        super().__init__()
+        self.processor = AutoFeatureExtractor.from_pretrained(ssl_model_name_or_path)
+        self.semantic_model = Wav2Vec2BertModel.from_pretrained(ssl_model_name_or_path)
+        self.model = model
+        self.freeze_semantic_model()
+
+    def freeze_semantic_model(self):
+        for param in self.semantic_model.parameters():
+            param.requires_grad = False
+
+    def forward(self, input_values, padding_mask):
+        semantic_input_values = gather_unpadded_tensors(input_values, padding_mask)
+        semantic_input_values = list(
+            map(
+                lambda audio: ta.functional.resample(
+                    audio, 
+                    self.model.config.sampling_rate, 
+                    self.processor.sampling_rate
+                ).cpu().numpy(), 
+                semantic_input_values
+            )
+        )
+        semantic_inputs = self.processor(
+            semantic_input_values, 
+            sampling_rate=self.processor.sampling_rate, 
+            return_tensors="pt"
+        ).to(device=input_values.device)
+
+        semantic_target_features = self.semantic_model(**semantic_inputs).last_hidden_state
+
+        return self.model(input_values, padding_mask, target_embeddings=semantic_target_features)
+
+def gather_unpadded_tensors(tensor, padding_mask):
+    """
+    Gathers a list of unpadded tensors from the input tensor and padding mask.
+
+    Args:
+        tensor (torch.Tensor): The input tensor of shape `(batch_size, seq_len, feature_dim)`.
+        padding_mask (torch.Tensor): The padding mask of shape `(batch_size, seq_len)` 
+                                      with `1` indicating valid tokens and `0` indicating padding.
+
+    Returns:
+        list[torch.Tensor]: A list of unpadded tensors, one for each batch element.
+    """
+    # Compute lengths of unpadded sequences
+    lengths = padding_mask.sum(dim=1)
+    
+    unpadded_tensors = []
+    for i, length in enumerate(lengths):
+        # Slice up to the valid length
+        unpadded_tensors.append(tensor[i, :length])
+    
+    return unpadded_tensors

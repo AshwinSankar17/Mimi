@@ -12,22 +12,40 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-@dataclass
 class DiscriminatorConfig(PretrainedConfig):
-    filters: int = 32
-    in_channels: int = 1
-    out_channels: int = 1
-    n_ffts: tp.List[int] = field(default_factory=lambda: [1024, 2048, 512])
-    hop_lengths: tp.List[int] = field(default_factory=lambda: [256, 512, 128])
-    win_lengths: tp.List[int] = field(default_factory=lambda: [1024, 2048, 512])
-    max_filters: int = 1024
-    filters_scale: int = 1
-    kernel_size: tp.Tuple[int, int] = (3, 9)
-    dilations: tp.List[int] = field(default_factory=lambda: [1, 2, 4])
-    stride: tp.Tuple[int, int] = (1, 2)
-    normalized: bool = True
-    norm: str = 'weight_norm'
-    activation: str = 'LeakyReLU'
-    activation_params: dict = field(default_factory=lambda: {'negative_slope': 0.2})
-    
-    model_type: str = "discriminator"
+    model_type="discriminator"
+    def __init__(
+        self,
+        filters=32,
+        in_channels=1,
+        out_channels=1,
+        n_ffts=None,
+        hop_lengths=None,
+        win_lengths=None,
+        max_filters=1024,
+        filters_scale=1,
+        kernel_size=(3, 9),
+        dilations=None,
+        stride=(1, 2),
+        normalized=True,
+        norm='weight_norm',
+        activation='LeakyReLU',
+        activation_params=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.n_ffts = n_ffts or [1024, 2048, 512]
+        self.hop_lengths = hop_lengths or [256, 512, 128]
+        self.win_lengths = win_lengths or [1024, 2048, 512]
+        self.max_filters = max_filters
+        self.filters_scale = filters_scale
+        self.kernel_size = kernel_size
+        self.dilations = dilations or [1, 2, 4]
+        self.stride = stride
+        self.normalized = normalized
+        self.norm = norm
+        self.activation = activation
+        self.activation_params = activation_params or {'negative_slope': 0.2}

@@ -1,0 +1,25 @@
+Metadata-Version: 2.1
+Name: mimi
+Version: 0.0.1
+Summary: Toolkit for using and training Mimi, a high-quality low frame-rate neural audio codec model.
+Description-Content-Type: text/markdown
+Requires-Dist: transformers<=4.46.1,>=4.46.1
+Requires-Dist: torch
+Requires-Dist: sentencepiece
+Requires-Dist: descript-audio-codec
+Requires-Dist: descript-audiotools@ git+https://github.com/descriptinc/audiotools
+Requires-Dist: protobuf>=4.0.0
+Provides-Extra: dev
+Requires-Dist: black~=23.1; extra == "dev"
+Requires-Dist: isort>=5.5.4; extra == "dev"
+Requires-Dist: ruff<=0.0.259,>=0.0.241; extra == "dev"
+Provides-Extra: train
+Requires-Dist: jiwer; extra == "train"
+Requires-Dist: wandb; extra == "train"
+Requires-Dist: accelerate; extra == "train"
+Requires-Dist: evaluate; extra == "train"
+Requires-Dist: datasets[audio]>=2.14.5; extra == "train"
+
+# Multilingual Mimi
+
+My shot at replicating Low Frame-rate Mimi Codec which operates at 12.5 Hz. Work in progress. Contributions welcome.

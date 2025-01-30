@@ -15,4 +15,5 @@ for fmap in fmaps:
     for fmp in fmap:
         print(fmp.shape)
 
-discriminator_model.save_pretrained("/home/tts/ttsteam/repos/Mimi/logs/first_checkpoint/discriminator")
+# discriminator_model.save_pretrained("/home/tts/ttsteam/repos/Mimi/logs/first_checkpoint/discriminator")
+discriminator_model.push_to_hub("AshwinSankar/Mimi-v1-multilingual-discriminator", private=True)
